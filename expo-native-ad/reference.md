@@ -277,10 +277,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 8,
   },
-  media: {
-    height: 180,
-    marginVertical: 6,
+    media: {
     width: "100%",
+    maxHeight: 280,
+    marginVertical: 8,
   },
   cta: {
     fontSize: 15,
