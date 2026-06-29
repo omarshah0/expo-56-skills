@@ -238,13 +238,3 @@ Apple App Store iPad screenshot canvas, portrait or landscape as supplied.
 Everything else should remain identical.
 
 ---
-
-## Install in other projects
-
-Copy or symlink this folder into the target project's `.cursor/skills/`:
-
-```bash
-cp -R skills/app-screenshots-generator-v2 /path/to/your-app/.cursor/skills/
-```
-
-Then invoke the skill by name or attach it in Cursor when generating screenshots.

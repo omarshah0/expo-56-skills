@@ -166,13 +166,3 @@ Faster Dashboard and Smarter Price Alerts
 ```
 
 ---
-
-## Install in other projects
-
-Copy or symlink this folder into the target project's `.cursor/skills/`:
-
-```bash
-cp -R skills/aso-release-notes /path/to/your-app/.cursor/skills/
-```
-
-Then invoke the skill by name or attach it in Cursor when writing release notes.
