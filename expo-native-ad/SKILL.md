@@ -1,6 +1,6 @@
 ---
 name: expo-native-ad
-description: Wires Expo NativeAdComponent with dev TestIds, prod platform unit IDs, retry/backoff, useForeground refresh, and web stub. Includes AdMob policy rules for ad visual separation and disclosure visibility. Use when adding native ads, NativeAdView, or NativeAdComponent to an Expo app.
+description: Wires Expo NativeAdComponent with AdHeader icon row, 180px NativeMediaView, dev TestIds, prod platform unit IDs, retry/backoff, useForeground refresh, and web stub. Includes AdMob policy rules for ad visual separation. Use when adding native ads, NativeAdView, or NativeAdComponent to an Expo app.
 ---
 
 # Expo: NativeAd
@@ -23,11 +23,18 @@ Functional wiring only. Preserve the **platform file splits** below.
 
 Requires **`AdsInitProvider`** to have initialized AdMob before ads load (see **expo-admob-att** skill).
 
+### UI layout (icon + media)
+
+- **`AdHeader`**: if `nativeAd.icon?.url`, render 40×40 icon in a row beside advertiser + headline; otherwise stack them.
+- **`NativeMediaView`**: `width: "100%"`, **`height: 180`**, `marginVertical: 6`.
+
 ---
 
 ## Agent checklist
 
 - [ ] Add `NativeAdComponent` + `.web` stub; `NATIVE_AD_UNIT_ID` defined in `native-ad.tsx` (no shared const module importing AdMob).
+- [ ] Implement `AdHeader` with icon row when icon URL present.
+- [ ] Use `NativeMediaView` at **180px** height, full width.
 
 **AdSense / AdMob policy safety:** Do not apply `borderRadius`, rounded wrappers, clipping masks, or `overflow: 'hidden'` to `NativeAdView`, `NativeMediaView`, CTA wrappers, asset wrappers, or any parent container that may contain AdMob disclosure / attribution icons. These icons must remain fully visible.
 
@@ -53,3 +60,9 @@ When generating or modifying `NativeAdComponent`:
 - **Full copy-paste snippets** (native ad component + web stub): [reference.md](reference.md)
 
 ---
+
+## Install in other projects
+
+```bash
+cp -R skills/expo-native-ad /path/to/your-app/.cursor/skills/
+```
