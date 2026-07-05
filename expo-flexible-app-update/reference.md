@@ -6,8 +6,6 @@ Replace placeholders before copying:
 - `{IOS_ITUNES_ITEM_ID}` — numeric App Store Apple ID
 - `{ANDROID_PACKAGE_NAME}` — e.g. `com.example.app`
 
-Source of truth: wapda-bill-check project files listed below.
-
 ---
 
 ## File layout
@@ -28,6 +26,7 @@ lib/
 ├── semver-compare.ts
 ├── flexible-app-update-storage.ts
 ├── flexible-app-update.ts
+├── flexible-app-update-analytics.ts   ← PostHog capture helpers
 └── flexible-app-update-navigation.ts
 ```
 
@@ -49,6 +48,23 @@ export const FLEXIBLE_APP_UPDATE_DEFAULTS = {
   secondaryButtonText: "Later",
   showAfterLaunchDelayMs: 1_000,
 } as const;
+
+export const FLEXIBLE_UPDATE_EVENTS = {
+  ios: {
+    shown: "ios_update_shown",
+    updateNowClicked: "ios_update_now_clicked",
+    laterClicked: "ios_update_later_clicked",
+    modalClosed: "ios_update_modal_closed",
+  },
+  android: {
+    shown: "android_update_shown",
+    updateNowClicked: "android_update_now_clicked",
+    laterClicked: "android_update_later_clicked",
+    modalClosed: "android_update_modal_closed",
+  },
+} as const;
+
+export type FlexibleUpdateDismissMethod = "gesture" | "backdrop" | "back_button";
 ```
 
 ---
@@ -73,7 +89,7 @@ export const FLEXIBLE_APP_UPDATE_DEFAULTS = {
 
 ## lib/semver-compare.ts
 
-Copy from wapda-bill-check. Exports `compareSemver(a, b)` and `isValidSemver(version)`.
+Exports `compareSemver(a, b)` and `isValidSemver(version)`.
 
 Show modal when: `compareSemver(installed, payloadVersion) === -1`.
 
@@ -100,6 +116,36 @@ Core exports:
 - `openStoreUpdateUrl(config)` — Linking + non-blocking Alert on failure
 
 Parsing: defensive; invalid fields fall back to `FLEXIBLE_APP_UPDATE_DEFAULTS`.
+
+---
+
+## lib/flexible-app-update-analytics.ts
+
+Central PostHog capture. Do not duplicate `posthog.capture` in content components.
+
+### Exports
+
+| Function | iOS event | Android event |
+|----------|-----------|-----------------|
+| `captureFlexibleUpdateShown(posthog, config, isPreview?)` | `ios_update_shown` | `android_update_shown` |
+| `captureFlexibleUpdateNowClicked(...)` | `ios_update_now_clicked` | `android_update_now_clicked` |
+| `captureFlexibleUpdateLaterClicked(...)` | `ios_update_later_clicked` | `android_update_later_clicked` |
+| `captureFlexibleUpdateModalClosed(..., dismissMethod, ...)` | `ios_update_modal_closed` | `android_update_modal_closed` |
+
+Helpers pick the event name from `Platform.OS` via `FLEXIBLE_UPDATE_EVENTS.ios` / `.android`.
+
+### Shared properties (auto-attached)
+
+`target_version`, `installed_version`, `remind_after_days`, `is_preview`
+
+`modal_closed` also sends `dismiss_method`.
+
+### Wiring rules
+
+- **Android controller:** fire `android_update_shown` when modal becomes visible; route `onDismiss(method)` to later vs modal_closed helpers
+- **iOS sheet route:** fire `ios_update_shown` on mount; use ref + `beforeRemove` to distinguish Later vs gesture swipe
+- **Update button:** `*_update_now_clicked` on tap, then `openStoreUpdateUrl` (no separate store outcome event)
+- **Dev preview:** pass `isPreview: true` when `getFlexibleAppUpdatePreviewConfig()` is active
 
 ---
 
@@ -130,8 +176,20 @@ markFlexibleAppUpdateSheetClosed();      // iOS route unmount
 4. Re-check eligibility
 5. `openFlexibleAppUpdatePresentation()` once per session
 6. Android: render `FlexibleAppUpdateModal` via `useSyncExternalStore`
+7. Android: `captureFlexibleUpdateShown` when `androidVisible` becomes true (`android_update_shown`)
+8. Android dismiss: `onDismiss('later' | 'backdrop' | 'back_button')` → `android_update_later_clicked` or `android_update_modal_closed`
 
 Dev helpers: `resetFlexibleAppUpdateHandledSession()`.
+
+---
+
+## components/flexible-app-update-modal.tsx
+
+Android only. `onDismiss` receives method:
+
+- Later button (via content) → `'later'`
+- Backdrop `Pressable` → `'backdrop'`
+- `onRequestClose` (hardware back) → `'back_button'`
 
 ---
 
@@ -162,10 +220,11 @@ Shared `FlexibleAppUpdateContent` — **no `flex: 1`** on root; intrinsic height
 
 `app/flexible-app-update.tsx`:
 - Render `FlexibleAppUpdateContent` with safe-area bottom padding
-- `beforeRemove` → record dismissal
-- `onUpdate` → `openStoreUpdateUrl`
-
-See `building-native-ui/references/form-sheet.md` in expo-56 Forex Factory project for full form-sheet patterns.
+- On mount → `captureFlexibleUpdateShown` → `ios_update_shown`
+- Later button → set ref `'later'`, then close
+- `beforeRemove` → if ref is `'later'` → `ios_update_later_clicked`; else → `ios_update_modal_closed` (`dismiss_method: gesture`)
+- `onUpdate` → `ios_update_now_clicked`, then `openStoreUpdateUrl`
+- Guard with `closeAnalyticsRecordedRef` so events fire once per close
 
 ---
 
@@ -173,12 +232,13 @@ See `building-native-ui/references/form-sheet.md` in expo-56 Forex Factory proje
 
 ```typescript
 import { resetFlexibleAppUpdateHandledSession } from '@/components/flexible-app-update-controller';
+import { getPreviewFlexibleUpdateConfig } from '@/lib/flexible-app-update';
 import { openFlexibleAppUpdatePresentation } from '@/lib/flexible-app-update-navigation';
 import { clearFlexibleUpdateDismissal } from '@/lib/flexible-app-update-storage';
 
-// Preview
+// Preview (pass preview config for is_preview analytics)
 resetFlexibleAppUpdateHandledSession();
-openFlexibleAppUpdatePresentation();
+openFlexibleAppUpdatePresentation(getPreviewFlexibleUpdateConfig());
 
 // Clear dismissal
 await clearFlexibleUpdateDismissal();
@@ -200,10 +260,13 @@ Keep both systems independent.
 
 ---
 
-## wapda-bill-check mapping
+## project mapping
 
 | File | Notes |
 |------|-------|
+| `lib/flexible-app-update-analytics.ts` | PostHog helpers + shared props |
+| `constants/posthog-feature-flags.ts` | Flag key + `FLEXIBLE_UPDATE_EVENTS` |
 | `hooks/use-flexible-app-update.ts` | PostHog hook |
-| `app/flexible-app-update.tsx` | iOS form sheet (SDK 54 project — migrate UI to 56 pattern when upgrading) |
-| `components/flexible-app-update-modal.tsx` | Android only |
+| `app/flexible-app-update.tsx` | iOS form sheet + Later vs gesture analytics |
+| `components/flexible-app-update-controller.tsx` | Android modal + auto-prompt analytics |
+| `components/flexible-app-update-modal.tsx` | Android dismiss method routing |

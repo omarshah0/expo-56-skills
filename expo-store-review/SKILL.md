@@ -1,11 +1,11 @@
 ---
 name: expo-store-review
-description: Adds native in-app store review prompts, manual "Rate this app" settings link, launch-count eligibility policy, and optional launch-interstitial coordination to Expo apps. Use when adding app reviews, store ratings, expo-store-review, or replicating the Forex Factory review flow in another Expo app.
+description: Adds native in-app store review prompts, manual "Rate this app" settings link, launch-count eligibility policy, and optional launch-interstitial coordination to Expo apps. Use when adding app reviews, store ratings, expo-store-review.
 ---
 
 # Expo Store Review
 
-Reusable store-review stack from the Forex Factory Calendar app. Provides:
+Provides:
 
 - **Auto prompt** — native `expo-store-review` dialog after eligibility checks
 - **Manual rate** — opens App Store / Play Store review page from Settings
@@ -101,7 +101,6 @@ On first launch (`count === 0`), `incrementLaunchCount` also calls `recordFirstO
 `StoreReviewController` waits until main content is ready before prompting. Adapt props to your app:
 
 ```typescript
-// Forex Factory example — calendar loaded with data
 <StoreReviewController
   loading={calendar.loading}
   error={calendar.error}

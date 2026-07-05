@@ -1,13 +1,11 @@
 ---
 name: expo-flexible-app-update
-description: Adds PostHog-driven flexible store update prompts (not OTA) with semver gating, dismiss cooldown, and App Store / Play Store links. Use when adding app update modals, flexible-app-update flags, store version prompts, or replicating the wapda-bill-check update flow in Expo apps.
+description: Adds PostHog-driven flexible store update prompts (not OTA) with semver gating, dismiss cooldown, App Store / Play Store links, and structured PostHog analytics (shown, update/later clicks, passive dismiss by platform). Use when adding app update modals, flexible-app-update flags, store version prompts, or replicating the update flow in Expo apps.
 ---
 
 # Expo Flexible App Store Update
 
 PostHog-controlled **store update** modal — guides users to App Store / Play Store. **Not** Expo OTA (`expo-updates`). Always dismissible; never forced.
-
-Reference implementation: wapda-bill-check. Full templates: [reference.md](reference.md)
 
 ## Before you start
 
@@ -30,16 +28,17 @@ Requires `posthog-react-native` if using the hook pattern.
 
 | File | Role |
 |------|------|
-| `constants/posthog-feature-flags.ts` | `FLEXIBLE_APP_UPDATE_FLAG` + defaults |
+| `constants/posthog-feature-flags.ts` | `FLEXIBLE_APP_UPDATE_FLAG`, defaults, event name constants |
 | `lib/semver-compare.ts` | Numeric semver compare (no npm dep) |
 | `lib/flexible-app-update-storage.ts` | AsyncStorage dismissal state |
 | `lib/flexible-app-update.ts` | Parse payload, eligibility, store URL |
+| `lib/flexible-app-update-analytics.ts` | **Central PostHog capture helpers** — shared event props |
 | `hooks/use-flexible-app-update.ts` | PostHog hook (swap point for hardcode) |
 | `lib/flexible-app-update-navigation.ts` | Open/close presentation |
 | `components/flexible-app-update-content.tsx` | Shared UI (logo, text, buttons) |
-| `components/flexible-app-update-controller.tsx` | Auto-prompt orchestrator |
+| `components/flexible-app-update-controller.tsx` | Auto-prompt orchestrator + Android analytics |
 | `components/flexible-app-update-modal.tsx` | Android centered modal |
-| `app/flexible-app-update.tsx` | iOS route (Expo 56 form sheet only) |
+| `app/flexible-app-update.tsx` | iOS route (Expo 56 form sheet) + iOS analytics |
 | `app/_layout.tsx` | Mount controller + optional sheet route |
 
 ---
@@ -47,8 +46,9 @@ Requires `posthog-react-native` if using the hook pattern.
 ## Integration checklist
 
 ```
-- [ ] Add FLEXIBLE_APP_UPDATE_FLAG to posthog-feature-flags.ts
+- [ ] Add FLEXIBLE_APP_UPDATE_FLAG + FLEXIBLE_UPDATE_EVENTS to posthog-feature-flags.ts
 - [ ] Copy lib + hook files; replace STORAGE_PREFIX and store IDs
+- [ ] Add lib/flexible-app-update-analytics.ts (do not inline posthog.capture in UI)
 - [ ] Add ios.appStoreUrl + android.playStoreUrl to app.json
 - [ ] Build UI (see generic prompt below)
 - [ ] Wire controller in root layout
@@ -127,7 +127,7 @@ Use app theme tokens + dark mode. **Do not use `flex: 1` on sheet content** — 
 | **≤54 (legacy)** | RN `Modal` transparent — centered card, dimmed backdrop | Same |
 | **56+** | Expo Router `formSheet` route, `sheetAllowedDetents: "fitToContents"`, grabber | Centered card modal |
 
-For Expo 56 native sheets, read `building-native-ui/references/form-sheet.md` in expo-56 projects (Forex Factory pattern). **Do not** use fixed detent fractions (e.g. `0.58`) for compact content — use `fitToContents`.
+For Expo 56 native sheets, read `building-native-ui/references/form-sheet.md` in expo-56 projects. **Do not** use fixed detent fractions (e.g. `0.58`) for compact content — use `fitToContents`.
 
 ---
 
@@ -151,11 +151,54 @@ Auto-prompt still needs payload `version` > installed. Preview bypasses eligibil
 
 ---
 
-## PostHog events (optional)
+## PostHog analytics
 
-`flexible_update_shown`, `flexible_update_dismissed`, `flexible_update_store_opened`, `flexible_update_store_failed`
+Use **`lib/flexible-app-update-analytics.ts`** — never scatter raw `posthog.capture` calls in content components. Parents (controller + iOS sheet route) own all event firing.
 
----
+Event names are **platform-prefixed** — no `platform` property on payloads; pick the right event name per OS.
+
+### Shared properties (every event)
+
+| Property | Value |
+|----------|-------|
+| `target_version` | PostHog payload semver |
+| `installed_version` | `Application.nativeApplicationVersion` → fallback `expoConfig.version` |
+| `remind_after_days` | From payload |
+| `is_preview` | `true` when opened from Settings dev preview |
+
+Filter production dashboards with `is_preview = false`.
+
+### Events
+
+| iOS | Android | When |
+|-----|---------|------|
+| `ios_update_shown` | `android_update_shown` | Sheet/modal visible |
+| `ios_update_now_clicked` | `android_update_now_clicked` | **Update Now** tapped |
+| `ios_update_later_clicked` | `android_update_later_clicked` | **Later** tapped |
+| `ios_update_modal_closed` | `android_update_modal_closed` | Passive close (swipe, backdrop, back) |
+
+`modal_closed` includes `dismiss_method`: `'gesture'` (iOS swipe) \| `'backdrop'` \| `'back_button'`.
+
+### Dismiss routing
+
+| Platform | Later | Passive close |
+|----------|-------|---------------|
+| **iOS** form sheet | Later button → `ios_update_later_clicked` | Sheet swipe → `ios_update_modal_closed` (`dismiss_method: gesture`) |
+| **Android** modal | Later button → `android_update_later_clicked` | Backdrop → `backdrop`; hardware back → `back_button` |
+
+Use a ref on iOS to distinguish Later vs gesture in `beforeRemove`. Android modal passes dismiss method via `onDismiss(method)`.
+
+### PostHog insight recipes
+
+- **Shown:** count `ios_update_shown` + `android_update_shown` (or separate trends)
+- **Update taps:** count `ios_update_now_clicked` + `android_update_now_clicked`
+- **Later taps:** count `ios_update_later_clicked` + `android_update_later_clicked`
+- **Passive close:** count `*_update_modal_closed` → breakdown by `dismiss_method`
+- **Funnel (per platform):** `*_update_shown` → `*_update_now_clicked`
+
+Event name constants live in `FLEXIBLE_UPDATE_EVENTS.ios` / `.android` (`constants/posthog-feature-flags.ts`).
+
+Full helper API: [reference.md](reference.md#libflexible-app-update-analyticsts)
 
 ## Hardcode swap
 
