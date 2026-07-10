@@ -279,7 +279,7 @@ const styles = StyleSheet.create({
   },
     media: {
     width: "100%",
-    maxHeight: 280,
+    height: Platform.OS === "android" ? 220 : 280,
     marginVertical: 8,
   },
   cta: {
