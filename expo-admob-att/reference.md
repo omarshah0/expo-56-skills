@@ -1,46 +1,56 @@
-# Reference: AdMob and ATT (cross-project)
+# Reference: Expo AdMob, UMP, and ATT
 
-Use this document as the **source of truth** when porting AdMob / ATT / UMP wiring to another Expo app. Replace placeholders (`YOUR_*`, `CHANGE_ME_*`) with project-specific values. **Path alias** `@/*` → repo root must match `tsconfig.json`.
+Use this as a portable pattern, not as a version lock. Replace every `CHANGE_ME_*` value and adapt import aliases to the target project.
 
----
+## Contents
 
-## Table of contents
+- [Version gate and dependencies](#version-gate-and-dependencies)
+- [AdMob console prerequisites](#admob-console-prerequisites)
+- [Static Expo config](#static-expo-config)
+- [Native provider](#native-provider)
+- [Web provider](#web-provider)
+- [Settings privacy options](#settings-privacy-options)
+- [Root layout](#root-layout)
+- [Testing-only consent reset](#testing-only-consent-reset)
+- [Config and runtime validation](#config-and-runtime-validation)
+- [Why the order matters](#why-the-order-matters)
 
-- [Dependencies (`package.json`)](#dependencies-packagejson)
-- [Static Expo config (`app.json`)](#static-expo-config-appjson)
-- [AdMob: `providers/ads-init-provider.tsx` (native)](#admob-providersads-init-providertsx-native)
-- [AdMob: `providers/ads-init-provider.web.tsx` (web)](#admob-providersads-init-providerwebtsx-web)
-- [Hooks: AdMob legal](#hooks-admob-legal)
-- [UMP reset: `lib/revoke-ads-consent.ts` + web](#ump-reset-librevoke-ads-consentts--web)
-- [Root layout: `app/_layout.tsx`](#root-layout-app_layouttsx)
-- [Legal URLs + WebView: `constants/legal-config.ts`, `app/legal-webview.tsx`](#legal-urls--webview-constantslegal-configts-applegal-webviewtsx)
-- [Metro / resolution](#metro--resolution)
+## Version gate and dependencies
 
----
+Read the target repo instructions first. Then inspect, rather than guess, the versions:
 
-## Dependencies (`package.json`)
-
-Install versions appropriate to your Expo SDK (below match **Expo SDK 54** template).
-
-```json
-{
-  "dependencies": {
-    "expo-tracking-transparency": "~6.0.8",
-    "react-native-google-mobile-ads": "^16.3.2"
-  }
-}
+```sh
+node -p "require('expo/package.json').version"
+node -p "require('react-native-google-mobile-ads/package.json').version"
+npx expo install --check
 ```
 
-**Notes**
+For Expo SDK `N`, read `https://docs.expo.dev/versions/vN.0.0/sdk/tracking-transparency/` and the matching `build-properties` page before editing config. Inspect the installed ads package's `AdsConsentInfo` and `AdsConsentInterface` types because consent APIs can change.
 
-- `expo-tracking-transparency`: required for ATT APIs used in the native ads provider on iOS.
-- `react-native-google-mobile-ads`: native AdMob; web uses `.web.tsx` shims so this is not loaded on web for the provider stub.
+Install Expo-owned packages with Expo's resolver and the ads package with the project's package manager:
 
----
+```sh
+npx expo install expo-tracking-transparency expo-build-properties
+npm install react-native-google-mobile-ads
+```
 
-## Static Expo config (`app.json`)
+Substitute `yarn`, `pnpm`, or `bun` for the last command when the lockfile requires it. This integration needs a development/production native build; Expo Go cannot supply an arbitrary third-party native module.
 
-**Plugins:** `expo-tracking-transparency`, `react-native-google-mobile-ads` (with App IDs). **Android ads:** add `com.google.android.gms.permission.AD_ID` to `android.permissions`.
+## AdMob console prerequisites
+
+Before testing code:
+
+1. Create and publish the applicable regional privacy messages in AdMob **Privacy & messaging**.
+2. On iOS, choose one ATT owner:
+   - Preferred: configure an AdMob IDFA explainer so UMP presents the explainer and ATT alert.
+   - Alternative: omit that message and use the provider's manual ATT fallback after UMP.
+3. Register consent test devices before forcing debug geography on physical devices.
+
+Do not show both a custom pre-prompt and a UMP IDFA explainer unless the product intentionally designed and reviewed that experience.
+
+## Static Expo config
+
+Merge this into the existing `app.json` or dynamic app config. Keep the two ATT strings identical. App IDs use `~`; ad unit IDs use `/` and do not belong here.
 
 ```json
 {
@@ -49,13 +59,27 @@ Install versions appropriate to your Expo SDK (below match **Expo SDK 54** templ
       "permissions": ["com.google.android.gms.permission.AD_ID"]
     },
     "plugins": [
-      "expo-tracking-transparency",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "extraProguardRules": "-keep class com.google.android.gms.internal.consent_sdk.** { *; }"
+          }
+        }
+      ],
+      [
+        "expo-tracking-transparency",
+        {
+          "userTrackingPermission": "CHANGE_ME_EXPLAIN_WHY_THE_APP_REQUESTS_TRACKING"
+        }
+      ],
       [
         "react-native-google-mobile-ads",
         {
-          "iosAppId": "ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY",
-          "androidAppId": "ca-app-pub-XXXXXXXXXXXXXXXX~ZZZZZZZZZZ",
-          "userTrackingUsageDescription": "This app uses your data to show personalized ads and improve your experience."
+          "iosAppId": "ca-app-pub-CHANGE_ME~CHANGE_ME",
+          "androidAppId": "ca-app-pub-CHANGE_ME~CHANGE_ME",
+          "delayAppMeasurementInit": true,
+          "userTrackingUsageDescription": "CHANGE_ME_EXPLAIN_WHY_THE_APP_REQUESTS_TRACKING"
         }
       ]
     ]
@@ -63,121 +87,194 @@ Install versions appropriate to your Expo SDK (below match **Expo SDK 54** templ
 }
 ```
 
-**Notes**
+If `expo-build-properties` already has `extraProguardRules`, append the UMP rule with a newline instead of replacing existing rules. A native rebuild is required after config-plugin changes.
 
-- App IDs use format `ca-app-pub-xxx~yyy` (AdMob **app** id, not ad unit id).
+## Native provider
 
----
+Create `providers/ads-init-provider.tsx`. This example targets the `react-native-google-mobile-ads` v16 consent surface. It intentionally:
 
-## AdMob: `providers/ads-init-provider.tsx` (native)
-
-Metro loads this on **iOS and Android**. Early return for `web` is defensive if the file were ever bundled on web without the `.web` override.
+- refreshes UMP on every native process launch;
+- accepts only UMP's `canRequestAds` as eligibility;
+- permits previous-session eligibility after a UMP network error;
+- lets UMP own ATT when it already changed ATT status;
+- otherwise requests ATT only after the consent flow and Purpose 1 check;
+- initializes Mobile Ads once; and
+- never turns readiness on merely because an operation failed.
 
 ```tsx
-import { getTrackingPermissionsAsync, requestTrackingPermissionsAsync } from "expo-tracking-transparency";
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import {
+  getTrackingPermissionsAsync,
+  requestTrackingPermissionsAsync,
+} from "expo-tracking-transparency";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Platform } from "react-native";
-import mobileAds, { AdsConsent, AdsConsentDebugGeography } from "react-native-google-mobile-ads";
+import mobileAds, {
+  AdsConsent,
+  AdsConsentPrivacyOptionsRequirementStatus,
+  type AdsConsentInfo,
+} from "react-native-google-mobile-ads";
 
-type AdsInitContextValue = {
+type AdsInitState = {
   adsReady: boolean;
-  isConsentRequired: boolean;
+  canRequestAds: boolean;
+  isPrivacyOptionsRequired: boolean;
 };
 
-const AdsInitContext = createContext<AdsInitContextValue>({ adsReady: false, isConsentRequired: false });
+type AdsInitContextValue = AdsInitState & {
+  showPrivacyOptionsForm: () => Promise<void>;
+};
 
-/** Minimum time after the consent flow before showing the iOS ATT prompt (better UX than back-to-back dialogs). */
-const ATT_PROMPT_DELAY_MS = 2000;
+const INITIAL_STATE: AdsInitState = {
+  adsReady: false,
+  canRequestAds: false,
+  isPrivacyOptionsRequired: false,
+};
+
+const AdsInitContext = createContext<AdsInitContextValue>({
+  ...INITIAL_STATE,
+  showPrivacyOptionsForm: async () => {},
+});
+
+// Module state survives provider remounts and React Strict Mode effect replay.
+let launchInitialization: Promise<AdsInitState> | null = null;
+let mobileAdsInitialized = false;
+
+function consentFields(info: AdsConsentInfo): Omit<AdsInitState, "adsReady"> {
+  return {
+    canRequestAds: info.canRequestAds,
+    isPrivacyOptionsRequired:
+      info.privacyOptionsRequirementStatus ===
+      AdsConsentPrivacyOptionsRequirementStatus.REQUIRED,
+  };
+}
+
+async function previousSessionConsent(error: unknown): Promise<AdsConsentInfo | null> {
+  console.warn("[Ads] UMP update/form failed; checking its prior-session state.", error);
+  try {
+    return await AdsConsent.getConsentInfo();
+  } catch (fallbackError) {
+    console.warn("[Ads] UMP state is unavailable.", fallbackError);
+    return null;
+  }
+}
+
+async function gatherConsent(): Promise<AdsConsentInfo | null> {
+  try {
+    // Required on every app launch on iOS and Android.
+    await AdsConsent.requestInfoUpdate();
+    return await AdsConsent.loadAndShowConsentFormIfRequired();
+  } catch (error) {
+    // UMP may still allow ads from a valid decision made in a previous session.
+    return previousSessionConsent(error);
+  }
+}
+
+async function requestManualAttIfAppropriate(): Promise<void> {
+  if (Platform.OS !== "ios") return;
+
+  try {
+    const { status } = await getTrackingPermissionsAsync();
+
+    // A configured UMP IDFA message will already have resolved this status.
+    if (status !== "undetermined") return;
+
+    const gdprApplies = await AdsConsent.getGdprApplies();
+    if (gdprApplies) {
+      const purposeConsents = await AdsConsent.getPurposeConsents();
+      if (!purposeConsents.startsWith("1")) return;
+    }
+
+    // No timer is needed. This occurs only after the UMP form has completed.
+    await requestTrackingPermissionsAsync();
+  } catch (error) {
+    // ATT controls IDFA. Failure or denial does not revoke UMP ad eligibility.
+    console.warn("[Ads] ATT unavailable; continuing without IDFA.", error);
+  }
+}
+
+async function initializeForConsent(info: AdsConsentInfo): Promise<AdsInitState> {
+  const consent = consentFields(info);
+  if (!consent.canRequestAds) return { ...consent, adsReady: false };
+
+  await requestManualAttIfAppropriate();
+
+  try {
+    if (!mobileAdsInitialized) {
+      await mobileAds().initialize();
+      mobileAdsInitialized = true;
+    }
+    return { ...consent, adsReady: true };
+  } catch (error) {
+    console.warn("[Ads] Mobile Ads SDK initialization failed.", error);
+    return { ...consent, adsReady: false };
+  }
+}
+
+async function initializeLaunch(): Promise<AdsInitState> {
+  const info = await gatherConsent();
+  return info ? initializeForConsent(info) : INITIAL_STATE;
+}
+
+function initializeLaunchOnce(): Promise<AdsInitState> {
+  launchInitialization ??= initializeLaunch();
+  return launchInitialization;
+}
 
 export function AdsInitProvider({ children }: { children: React.ReactNode }) {
-  const [adsReady, setAdsReady] = useState(false);
-  const [isConsentRequired, setIsConsentRequired] = useState(false);
+  const [state, setState] = useState<AdsInitState>(INITIAL_STATE);
+  const privacyFormPromise = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
-    if (Platform.OS === "web") return;
-
     let cancelled = false;
 
-    (async () => {
-      try {
-        // =========================
-        // ANDROID FLOW
-        // =========================
-        if (Platform.OS === "android") {
-          const info = await AdsConsent.requestInfoUpdate(__DEV__ ? { debugGeography: AdsConsentDebugGeography.EEA } : {});
-
-          if (__DEV__) {
-            console.log("[Android] Consent status:", info.status);
-          }
-
-          if (info.isConsentFormAvailable) {
-            setIsConsentRequired(true);
-            await AdsConsent.loadAndShowConsentFormIfRequired();
-          }
-
-          if (cancelled) return;
-
-          await mobileAds().initialize();
-          setAdsReady(true);
-          return;
-        }
-
-        // =========================
-        // iOS FLOW
-        // =========================
-        let attAllowed = false;
-
-        const { status } = await getTrackingPermissionsAsync();
-
-        if (status === "undetermined") {
-          await new Promise((resolve) => setTimeout(resolve, ATT_PROMPT_DELAY_MS));
-          if (cancelled) return;
-
-          const res = await requestTrackingPermissionsAsync();
-          attAllowed = res.status === "granted";
-        } else {
-          attAllowed = status === "granted";
-        }
-
-        if (__DEV__) {
-          console.log("[iOS] ATT allowed:", attAllowed);
-        }
-
-        if (!attAllowed) {
-          if (__DEV__) console.log("[iOS] ATT denied → init ads");
-
-          await mobileAds().initialize();
-          if (!cancelled) setAdsReady(true);
-          return;
-        }
-
-        const info = await AdsConsent.requestInfoUpdate(__DEV__ ? { debugGeography: AdsConsentDebugGeography.EEA } : {});
-
-        if (__DEV__) {
-          console.log("[iOS] Consent status:", info.status);
-        }
-
-        if (info.isConsentFormAvailable) {
-          setIsConsentRequired(true);
-          await AdsConsent.loadAndShowConsentFormIfRequired();
-        }
-
-        if (cancelled) return;
-
-        await mobileAds().initialize();
-        setAdsReady(true);
-      } catch (e) {
-        console.error("Ads init failed:", e);
-        setAdsReady(true);
-      }
-    })();
+    void initializeLaunchOnce().then((next) => {
+      if (!cancelled) setState(next);
+    });
 
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const value = useMemo(() => ({ adsReady, isConsentRequired }), [adsReady, isConsentRequired]);
+  const showPrivacyOptionsForm = useCallback((): Promise<void> => {
+    if (privacyFormPromise.current) return privacyFormPromise.current;
+
+    const task = (async () => {
+      // Ad slots should observe this and release ads loaded under the old choice.
+      setState((current) => ({ ...current, adsReady: false }));
+
+      try {
+        const info = await AdsConsent.showPrivacyOptionsForm();
+        const next = await initializeForConsent(info);
+        launchInitialization = Promise.resolve(next);
+        setState(next);
+      } catch (error) {
+        const info = await previousSessionConsent(error);
+        const next = info ? await initializeForConsent(info) : INITIAL_STATE;
+        launchInitialization = Promise.resolve(next);
+        setState(next);
+        throw error;
+      }
+    })().finally(() => {
+      privacyFormPromise.current = null;
+    });
+
+    privacyFormPromise.current = task;
+    return task;
+  }, []);
+
+  const value = useMemo(
+    () => ({ ...state, showPrivacyOptionsForm }),
+    [showPrivacyOptionsForm, state],
+  );
 
   return <AdsInitContext.Provider value={value}>{children}</AdsInitContext.Provider>;
 }
@@ -187,36 +284,40 @@ export function useAdsInit(): AdsInitContextValue {
 }
 ```
 
-**Behavior summary**
+Do not use `adsReady` to block rendering the application. Use it only to gate ad creation and to release ads when it becomes false. Each ad loader should require `adsReady && canRequestAds` immediately before calling the native ad API.
 
-| Platform | Order                                                                           |
-| -------- | ------------------------------------------------------------------------------- |
-| Android  | UMP `requestInfoUpdate` → optional form → `mobileAds().initialize()`            |
-| iOS      | ATT (delayed if undetermined) → if denied, init ads; if granted, UMP → init ads |
-| Error    | Logs and sets `adsReady: true` so UI does not hang                              |
+## Web provider
 
----
-
-## AdMob: `providers/ads-init-provider.web.tsx` (web)
-
-Same **export names** as native so imports stay `@/providers/ads-init-provider`. No `react-native-google-mobile-ads` import on web.
+Create `providers/ads-init-provider.web.tsx` with the same exports and no native ads imports:
 
 ```tsx
 import React, { createContext, useContext, useMemo } from "react";
 
 type AdsInitContextValue = {
   adsReady: boolean;
-  isConsentRequired: boolean;
+  canRequestAds: boolean;
+  isPrivacyOptionsRequired: boolean;
+  showPrivacyOptionsForm: () => Promise<void>;
 };
 
 const AdsInitContext = createContext<AdsInitContextValue>({
-  adsReady: true,
-  isConsentRequired: false,
+  adsReady: false,
+  canRequestAds: false,
+  isPrivacyOptionsRequired: false,
+  showPrivacyOptionsForm: async () => {},
 });
 
-/** Web: no AdMob / UMP / ATT — stable context so the bundle never pulls native ad SDKs. */
 export function AdsInitProvider({ children }: { children: React.ReactNode }) {
-  const value = useMemo(() => ({ adsReady: true, isConsentRequired: false }), []);
+  const value = useMemo(
+    () => ({
+      adsReady: false,
+      canRequestAds: false,
+      isPrivacyOptionsRequired: false,
+      showPrivacyOptionsForm: async () => {},
+    }),
+    [],
+  );
+
   return <AdsInitContext.Provider value={value}>{children}</AdsInitContext.Provider>;
 }
 
@@ -225,100 +326,52 @@ export function useAdsInit(): AdsInitContextValue {
 }
 ```
 
----
+Give each ad component or hook its own `.web.tsx` no-op as well. A provider shim alone cannot protect a web bundle if another web-reachable module imports `react-native-google-mobile-ads` directly.
 
-## Hooks: AdMob legal
+## Settings privacy options
 
-### `hooks/use-admob-legal.ts`
+Expose the provider through an optional project-named hook:
 
 ```tsx
-/**
- * AdMob legal / consent surface: EU UMP + readiness.
- * @see https://developers.google.com/admob/ios/eu-consent
- * @see https://developers.google.com/admob/android/eu-consent
- */
-import { useAdsInit } from "@/providers/ads-init-provider";
-
-export function useAdmobLegal(): { isConsentRequired: boolean; adsReady: boolean } {
-  const { isConsentRequired, adsReady } = useAdsInit();
-  return { isConsentRequired, adsReady };
-}
+export { useAdsInit } from "@/providers/ads-init-provider";
 ```
 
----
-
-## UMP reset: `lib/revoke-ads-consent.ts` + web
-
-### `lib/revoke-ads-consent.ts`
+Render the row only when UMP requires it and coalesce duplicate taps:
 
 ```tsx
-import { Platform } from "react-native";
-import { AdsConsent, AdsConsentDebugGeography } from "react-native-google-mobile-ads";
+const {
+  isPrivacyOptionsRequired,
+  showPrivacyOptionsForm,
+} = useAdsInit();
+const [privacyBusy, setPrivacyBusy] = useState(false);
 
-const consentOptions = __DEV__ ? { debugGeography: AdsConsentDebugGeography.EEA } : undefined;
-
-/**
- * Resets UMP consent state and presents Google's form again when available.
- * `adsReady` is for call-site parity with settings UI.
- */
-export async function revokeAdsConsentAndShowForm(_adsReady: boolean): Promise<void> {
-  if (Platform.OS === "web") {
-    return;
-  }
-
-  AdsConsent.reset();
-  const info = await AdsConsent.requestInfoUpdate(consentOptions);
-
-  if (info.isConsentFormAvailable) {
-    await AdsConsent.loadAndShowConsentFormIfRequired();
+async function onPrivacyOptionsPress() {
+  if (privacyBusy) return;
+  setPrivacyBusy(true);
+  try {
+    await showPrivacyOptionsForm();
+  } finally {
+    setPrivacyBusy(false);
   }
 }
+
+// Adapt this to the project's settings-row component.
+return isPrivacyOptionsRequired ? (
+  <Button
+    disabled={privacyBusy}
+    onPress={() => void onPrivacyOptionsPress()}
+    title="Privacy choices"
+  />
+) : null;
 ```
 
-### `lib/revoke-ads-consent.web.ts`
+Do not label this action “reset consent.” It presents Google's currently required privacy-options form and applies the resulting eligibility.
+
+## Root layout
+
+Wrap navigation once, without delaying normal app UI:
 
 ```tsx
-export async function revokeAdsConsentAndShowForm(_adsReady: boolean): Promise<void> {
-  // no-op
-}
-```
-
----
-
-## Root layout: `app/_layout.tsx`
-
-Provider order: **AppThemeProvider** → **AdsInitProvider** → navigation. Adjust `Stack.Screen` entries to your routes.
-
-```tsx
-import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
-import { Stack } from "expo-router";
-import { StatusBar } from "expo-status-bar";
-import "react-native-reanimated";
-import { SafeAreaProvider } from "react-native-safe-area-context";
-
-import { AdsInitProvider } from "@/providers/ads-init-provider";
-import { AppThemeProvider, useAppThemeContext } from "@/providers/app-theme-provider";
-
-export const unstable_settings = {
-  anchor: "(tabs)",
-};
-
-function RootNavigation() {
-  const { resolvedColorScheme } = useAppThemeContext();
-
-  return (
-    <SafeAreaProvider>
-      <ThemeProvider value={resolvedColorScheme === "dark" ? DarkTheme : DefaultTheme}>
-        <Stack screenOptions={{ headerBackTitle: "Back" }}>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="legal-webview" options={{ title: "", headerBackButtonDisplayMode: "minimal" }} />
-        </Stack>
-        <StatusBar style={resolvedColorScheme === "dark" ? "light" : "dark"} />
-      </ThemeProvider>
-    </SafeAreaProvider>
-  );
-}
-
 export default function RootLayout() {
   return (
     <AppThemeProvider>
@@ -330,116 +383,111 @@ export default function RootLayout() {
 }
 ```
 
----
+Provider order may follow project dependencies; the requirement is that all native ad loaders are descendants of `AdsInitProvider`.
 
-## Legal URLs + WebView: `constants/legal-config.ts`, `app/legal-webview.tsx`
+## Testing-only consent reset
 
-**Dependency:** `react-native-webview`. Only URLs listed in `LEGAL_URLS` (or matching `key`) load — avoids opening arbitrary URLs from query params.
-
-### `constants/legal-config.ts`
+`AdsConsent.reset()` is a UMP testing tool, not a production withdrawal API. If a debug screen needs it, make the guard impossible to bypass accidentally:
 
 ```tsx
-export const LEGAL_URLS = {
-  termsOfService: "https://your-domain.com/terms",
-  privacyPolicy: "https://your-domain.com/privacy",
-  support: "https://your-domain.com/support",
-} as const;
-
-export type LegalDocKey = keyof typeof LEGAL_URLS;
-
-export const LEGAL_SETTINGS_ROWS: { key: LegalDocKey; label: string }[] = [
-  { key: "termsOfService", label: "Terms of Service" },
-  { key: "privacyPolicy", label: "Privacy Policy" },
-  { key: "support", label: "Support" },
-];
+async function resetConsentForRegisteredTestDevice() {
+  if (!__DEV__) throw new Error("UMP reset is development-only");
+  AdsConsent.reset();
+  // Relaunch and run requestInfoUpdate with explicit debug settings.
+}
 ```
 
-### `app/legal-webview.tsx`
+Reset does not reset iOS ATT. Delete and reinstall the test app to exercise the ATT prompt again. Never use placeholder test IDs or forced geography in a release build.
 
-```tsx
-import { LEGAL_URLS, type LegalDocKey } from "@/constants/legal-config";
-import { useNavigation } from "@react-navigation/native";
-import { useLocalSearchParams } from "expo-router";
-import { useEffect, useMemo } from "react";
-import { ActivityIndicator, Platform, StyleSheet, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { WebView } from "react-native-webview";
+## Config and runtime validation
 
-const ALLOWED_URLS = new Set<string>(Object.values(LEGAL_URLS));
+### Introspect generated config
 
-function resolveLegalUrl(key: string | undefined, fallbackUrl: string | undefined): string | null {
-  if (key && key in LEGAL_URLS) {
-    return LEGAL_URLS[key as LegalDocKey];
-  }
-  if (fallbackUrl && ALLOWED_URLS.has(fallbackUrl)) {
-    return fallbackUrl;
-  }
-  return null;
-}
+Run from the target project:
 
-export default function LegalWebViewScreen() {
-  const navigation = useNavigation();
-  const insets = useSafeAreaInsets();
-  const { url, title, key } = useLocalSearchParams<{
-    url?: string;
-    title?: string;
-    key?: string;
-  }>();
-
-  const resolvedUrl = useMemo(() => resolveLegalUrl(typeof key === "string" ? key : undefined, typeof url === "string" ? url : undefined), [key, url]);
-
-  useEffect(() => {
-    if (title) {
-      navigation.setOptions({ title: String(title) });
-    }
-  }, [navigation, title]);
-
-  if (!resolvedUrl) {
-    return (
-      <View style={[styles.centered, { paddingBottom: insets.bottom }]}>
-        <ActivityIndicator />
-      </View>
-    );
-  }
-
-  return (
-    <View style={[styles.flex, { paddingBottom: Platform.OS === "ios" ? 0 : insets.bottom }]}>
-      <WebView
-        source={{ uri: resolvedUrl }}
-        style={styles.flex}
-        startInLoadingState
-        renderLoading={() => (
-          <View style={styles.loader}>
-            <ActivityIndicator />
-          </View>
-        )}
-      />
-    </View>
+```sh
+npx expo config --type introspect --json > /tmp/expo-admob-introspect.json
+node <<'NODE'
+const config = require('/tmp/expo-admob-introspect.json');
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const plugin = (name) =>
+  (config.plugins ?? []).find((entry) =>
+    (Array.isArray(entry) ? entry[0] : entry) === name
   );
-}
 
-const styles = StyleSheet.create({
-  flex: {
-    flex: 1,
-  },
-  centered: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  loader: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-});
+const adsPlugin = plugin('react-native-google-mobile-ads');
+const trackingPlugin = plugin('expo-tracking-transparency');
+const buildPlugin = plugin('expo-build-properties');
+const infoPlist = config._internal?.modResults?.ios?.infoPlist ?? {};
+const manifest = config._internal?.modResults?.android?.manifest?.manifest ?? {};
+const permissions = manifest['uses-permission'] ?? [];
+const metadata = manifest.application?.[0]?.['meta-data'] ?? [];
+
+assert(Array.isArray(adsPlugin), 'AdMob Expo plugin missing');
+assert(adsPlugin[1]?.delayAppMeasurementInit === true, 'Delayed measurement missing');
+assert(infoPlist.GADDelayAppMeasurementInit === true, 'iOS delayed measurement not generated');
+assert(Boolean(infoPlist.GADApplicationIdentifier), 'iOS AdMob app ID not generated');
+assert(Boolean(infoPlist.NSUserTrackingUsageDescription), 'iOS ATT text not generated');
+assert(
+  trackingPlugin?.[1]?.userTrackingPermission ===
+    adsPlugin?.[1]?.userTrackingUsageDescription,
+  'ATT descriptions differ between plugins'
+);
+assert(
+  permissions.some((item) =>
+    item.$?.['android:name'] === 'com.google.android.gms.permission.AD_ID'
+  ),
+  'Android AD_ID permission missing'
+);
+assert(
+  metadata.some((item) =>
+    item.$?.['android:name'] === 'com.google.android.gms.ads.APPLICATION_ID'
+  ),
+  'Android AdMob app ID not generated'
+);
+assert(
+  metadata.some((item) =>
+    item.$?.['android:name'] ===
+      'com.google.android.gms.ads.DELAY_APP_MEASUREMENT_INIT' &&
+    item.$?.['android:value'] === 'true'
+  ),
+  'Android delayed measurement not generated'
+);
+assert(
+  buildPlugin?.[1]?.android?.extraProguardRules?.includes(
+    'com.google.android.gms.internal.consent_sdk'
+  ),
+  'UMP ProGuard keep rule missing from Expo config'
+);
+
+console.log('AdMob/UMP Expo config checks passed');
+NODE
 ```
 
-**Navigation example:** `router.push({ pathname: '/legal-webview', params: { key: 'privacyPolicy', title: 'Privacy' } })`.
+Introspection verifies the config-plugin inputs and generated plist/manifest. To verify the actual ProGuard output, inspect `android/app/proguard-rules.pro` after prebuild. Run `expo prebuild` only in a clean/disposable worktree if native directories contain hand-written changes.
 
----
+### Build and behavior checks
 
-## Metro / resolution
+- Run the project's typecheck and lint commands.
+- Build both native platforms after config changes; a JavaScript-only reload is insufficient.
+- Confirm web export/build succeeds without resolving the native ads module.
+- Test EEA first launch: consent form, Purpose 1 accepted/declined, ATT accepted/denied.
+- Test non-EEA first launch and returning launches.
+- Test UMP failure with no prior decision: no ad request and `adsReady` stays false.
+- Test UMP failure with valid prior eligibility: IDFA-appropriate ads may continue.
+- Test the required privacy-options row and confirm mounted ad slots release their old ads while the form is open.
+- Test React Strict Mode/development replay and confirm Mobile Ads initialization occurs once.
+- Use AdMob test unit IDs for ad rendering; consent debug settings and ad test IDs solve different problems.
 
-- `*.web.tsx` overrides `*.tsx` for the same import path on web (`ads-init-provider`, `revoke-ads-consent`).
-- No extra `metro.config.js` is required beyond standard Expo for this pattern.
+## Why the order matters
+
+- Google requires a consent-information update on each launch, then the required form, then a `canRequestAds` check.
+- UMP can present the AdMob-configured IDFA explainer and ATT alert itself.
+- When ATT remains undetermined, a manual request belongs after UMP; under GDPR, Purpose 1 must permit storage/access first.
+- ATT denial removes IDFA from requests but does not itself forbid eligible ads.
+- `privacyOptionsRequirementStatus` controls whether a production privacy entry point is required. Form availability is not the same state.
+- Delayed measurement prevents the ads SDK from beginning user-level measurement before the consent-gated first ad request.
+
+Primary sources: [Google UMP iOS](https://developers.google.com/admob/ios/privacy), [Google UMP Android](https://developers.google.com/admob/android/privacy), [Google IDFA message](https://developers.google.com/admob/ios/privacy/idfa), [Google GDPR guidance](https://developers.google.com/admob/ios/privacy/gdpr), [React Native Google Mobile Ads consent](https://docs.page/invertase/react-native-google-mobile-ads/european-user-consent), and the target Expo SDK's versioned TrackingTransparency/BuildProperties docs.
