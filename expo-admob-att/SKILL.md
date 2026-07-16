@@ -1,79 +1,59 @@
 ---
 name: expo-admob-att
-description: Wires Expo AdMob initialization with iOS ATT delay, Android/iOS UMP consent, web shims, useAdmobLegal hook, and revoke-ads-consent for settings. Use when adding AdMob, react-native-google-mobile-ads, expo-tracking-transparency, AdsInitProvider, ATT prompt flow, or UMP consent reset to an Expo app.
+description: Wire or audit privacy-safe Google Mobile Ads startup in an Expo app using react-native-google-mobile-ads, Android/iOS UMP consent, iOS ATT, delayed app measurement, web shims, and a production privacy-options entry point. Use when adding or reviewing AdMob initialization, AdsInitProvider, expo-tracking-transparency, canRequestAds gating, GDPR/UMP or IDFA messages, consent withdrawal, or AdMob settings UI.
 ---
 
-# Expo: AdMob and ATT
+# Expo AdMob, UMP, and ATT
 
-Functional wiring only. Preserve the **provider order** and **platform file splits** below.
+Implement consent as an ad-request gate, not as a timer. Read [reference.md](reference.md) before generating provider or settings code.
 
-## Stack assumptions
+## Establish the exact versions
 
-- Expo SDK 54+, **New Architecture** enabled, **expo-router** file-based routes.
-- Path alias `@/*` → project root (see `tsconfig.json`).
+1. Read the repository instructions and `package.json`.
+2. Determine the installed Expo SDK and `react-native-google-mobile-ads` versions. Do not copy dependency versions from this skill.
+3. Read the matching versioned Expo docs, for example SDK 57:
+   - `https://docs.expo.dev/versions/v57.0.0/sdk/tracking-transparency/`
+   - `https://docs.expo.dev/versions/v57.0.0/sdk/build-properties/`
+4. Check the installed ads package types and its current consent guide before using an API. The snippets in `reference.md` target the v16 consent API; adapt only when the installed API proves different.
 
----
+## Preserve these invariants
 
-## AdMob initialization
+- Request fresh UMP consent information on **every native app launch on both platforms**.
+- Load and show the required UMP form, then read the returned/current `canRequestAds` value.
+- Never request an ad or expose `adsReady: true` unless UMP says ads may be requested and `mobileAds().initialize()` succeeded.
+- On a UMP error, inspect UMP's previous-session `canRequestAds`; never manufacture eligibility.
+- Let a configured UMP IDFA message handle ATT. If ATT is manual, request it only after UMP and only when GDPR Purpose 1 permits device storage/access.
+- Treat ATT denial as loss of IDFA, not loss of ad eligibility. Continue with eligible IDFA-less ads.
+- Initialize the Mobile Ads SDK once per process and tolerate React Strict Mode effect replay.
+- Derive the settings entry from `privacyOptionsRequirementStatus`; present `showPrivacyOptionsForm()` from a user action.
+- Use `AdsConsent.reset()` only on registered test devices during development, never as production consent withdrawal.
+- Keep native ads imports out of web bundles with matching `.web.tsx` modules.
 
-### Dependencies
+## Implementation workflow
 
-- `react-native-google-mobile-ads`
-- `expo-tracking-transparency` (iOS ATT + aligns with UMP flow)
+1. Configure GDPR/privacy messages in AdMob. Configure an IDFA explainer there if UMP should own ATT.
+2. Install version-compatible dependencies with the project's package manager. Prefer `npx expo install` for Expo packages.
+3. Configure both AdMob app IDs, the same ATT usage string in both plugins, `delayAppMeasurementInit: true`, Android `AD_ID`, and the UMP ProGuard keep rule. Merge with existing plugin options; do not overwrite other ProGuard rules.
+4. Add the native/web provider pair from `reference.md` and wrap navigation at the root.
+5. Make every ad loader require both `adsReady` and `canRequestAds`, and make it release loaded ads when readiness becomes false.
+6. Add a privacy-options row only when required. Disable duplicate taps while its promise is pending.
+7. Validate config introspection, TypeScript, lint, native generation/builds, and the consent test matrix in `reference.md`.
 
-### Config (`app.json` / `app.config`)
+## Reject these patterns
 
-- Add plugin `react-native-google-mobile-ads` with **placeholder** `iosAppId` / `androidAppId` (format `ca-app-pub-xxx~yyy`) and `userTrackingUsageDescription`.
-- Keep `expo-tracking-transparency` in the plugins list (order is not critical; match project conventions).
-- **Android**: include `com.google.android.gms.permission.AD_ID` in `android.permissions` if you serve ads.
+- ATT-first flow, arbitrary prompt sleeps, or skipping UMP after ATT denial
+- `isConsentFormAvailable` used as “consent required” or as the settings-row condition
+- unconditional `adsReady: true` merely because an operation threw
+- ad requests before `canRequestAds`
+- persisted app-owned consent status used instead of the per-launch UMP update
+- production “revoke” actions implemented with `AdsConsent.reset()`
+- debug geography or test-device overrides shipped in release configuration
 
-### Provider split (Metro resolves `.web` automatically)
+## Primary references
 
-| File | Role |
-|------|------|
-| `providers/ads-init-provider.tsx` | Native: ATT delay → optional UMP (`AdsConsent`) → `mobileAds().initialize()`. Exposes `useAdsInit()` → `{ adsReady, isConsentRequired }`. |
-| `providers/ads-init-provider.web.tsx` | Web: **no** native SDK imports; context `{ adsReady: true, isConsentRequired: false }` so imports never pull AdMob. |
-
-**Native flow summary**
-
-- **Android**: `AdsConsent.requestInfoUpdate` (optional `debugGeography: EEA` in `__DEV__`) → `loadAndShowConsentFormIfRequired` if available → initialize ads.
-- **iOS**: Read ATT status; if `undetermined`, wait ~2s then `requestTrackingPermissionsAsync`. If ATT denied, initialize ads immediately. If granted, run UMP then initialize.
-
-On any init failure, still set `adsReady: true` after logging so the app is not stuck (adjust if you prefer a hard gate).
-
-### Optional hook
-
-- `hooks/use-admob-legal.ts`: thin re-export of `useAdsInit()` for settings/legal copy that mentions consent.
-
-### Consent reset (settings)
-
-- `lib/revoke-ads-consent.ts`: `AdsConsent.reset()` → `requestInfoUpdate` → `loadAndShowConsentFormIfRequired` when form available; guard `Platform.OS === 'web'`.
-- `lib/revoke-ads-consent.web.ts`: no-op for parity.
-
-### Root layout
-
-Wrap navigation so ads init runs app-wide:
-
-1. Outer: **app theme** provider (or your existing theme system).
-2. Inner: **`AdsInitProvider`**.
-3. Then: router / `Stack` / `Tabs`.
-
-`unstable_settings` with `anchor: '(tabs)'` is optional but matches expo-router tab anchoring used with tab groups.
-
----
-
-## Agent checklist
-
-**AdMob**
-
-- [ ] Install packages; configure plugins and Android `AD_ID` if needed.
-- [ ] Add `ads-init-provider.tsx` + `ads-init-provider.web.tsx`; wrap root layout.
-- [ ] Optional: `use-admob-legal`, `revoke-ads-consent` (+ web no-op), legal WebView routes if required.
-
----
-
-## References
-
-- **Full copy-paste snippets** (providers, hooks, layouts, EAS config, legal WebView): [reference.md](reference.md)
-
----
+- [Google UMP for iOS](https://developers.google.com/admob/ios/privacy)
+- [Google UMP for Android](https://developers.google.com/admob/android/privacy)
+- [Google iOS IDFA message](https://developers.google.com/admob/ios/privacy/idfa)
+- [Google GDPR guidance](https://developers.google.com/admob/ios/privacy/gdpr)
+- [React Native Google Mobile Ads consent guide](https://docs.page/invertase/react-native-google-mobile-ads/european-user-consent)
+- [Reusable code and verification](reference.md)
