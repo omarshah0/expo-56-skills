@@ -51,7 +51,7 @@ Requires `posthog-react-native` if using the hook pattern.
 - [ ] Add lib/flexible-app-update-analytics.ts (do not inline posthog.capture in UI)
 - [ ] Add ios.appStoreUrl + android.playStoreUrl to app.json
 - [ ] Build UI (see generic prompt below)
-- [ ] Wire controller in root layout
+- [ ] Wire controller in root layout (session race rules below — do not mark handled until the sheet actually opens)
 - [ ] Create PostHog flag with per-platform payload
 - [ ] Add dev preview + clear dismissal in Settings (__DEV__)
 ```
@@ -131,6 +131,35 @@ For Expo 56 native sheets, read `building-native-ui/references/form-sheet.md` in
 
 ---
 
+## Auto-prompt session race (required)
+
+The launch effect is async (`AppState` wait + `showAfterLaunchDelayMs`). ATT, PostHog `reloadFeatureFlags()` on resume, and a new `config` object identity all remount the effect and run its cleanup.
+
+**Symptom:** Settings still reports the user is eligible (`Would auto-show: true`) but the sheet never appears after a cold start. First effect run armed the delay then got cancelled; a module-level `handledThisSession = true` already fired, so the next run skipped forever.
+
+**Do this:**
+
+1. Wait for `AppState === "active"` **before** the delay and **again after** it. Do not open under ATT or while backgrounded.
+2. Set `handledThisSession = true` **only immediately before** `openFlexibleAppUpdatePresentation(config)`.
+3. Effect deps: `config?.enabled`, `config?.version`, `config?.showAfterLaunchDelayMs`, `ready` — **not** the whole `config` object.
+4. Pass that `config` into `openFlexibleAppUpdatePresentation(config)`.
+5. On teardown set `cancelled = true` and bail after every `await`. If cancelled, leave `handledThisSession` false so a later run can still show.
+
+**Do not:**
+
+```tsx
+// Wrong — marks handled before the delay; cancelled runs skip forever
+if (handledThisSession) return;
+handledThisSession = true;
+const t = setTimeout(() => openFlexibleAppUpdatePresentation(), delay);
+return () => clearTimeout(t);
+// also wrong: [config, ready] — new payload object retriggers and cancels the delay
+```
+
+Canonical controller: [reference.md](reference.md#componentsflexible-app-update-controllertsx)
+
+---
+
 ## Root layout
 
 ```tsx
@@ -144,7 +173,7 @@ Separate from OTA `UpdateBanner` / `ota-forced-update` flag.
 ## Dev testing
 
 Settings → Developer ( `__DEV__` only ):
-- **Preview flexible update** → `openFlexibleAppUpdatePresentation()`
+- **Preview flexible update** → `openFlexibleAppUpdatePresentation(config)`
 - **Clear update dismissal** → `clearFlexibleUpdateDismissal()` + reload
 
 Auto-prompt still needs payload `version` > installed. Preview bypasses eligibility.

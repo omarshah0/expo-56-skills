@@ -153,7 +153,7 @@ Helpers pick the event name from `Platform.OS` via `FLEXIBLE_UPDATE_EVENTS.ios` 
 
 Pattern matches `use-forced-ota-update.ts`:
 - `useFeatureFlagWithPayload(FLEXIBLE_APP_UPDATE_FLAG)`
-- Reload flags on `AppState` active
+- Reload flags on `AppState` active — this remounts the controller effect; see the session-race rules in the controller
 - Return `{ ready, config }`; safe default when flag off/not ready
 
 ---
@@ -161,25 +161,69 @@ Pattern matches `use-forced-ota-update.ts`:
 ## lib/flexible-app-update-navigation.ts
 
 ```typescript
-openFlexibleAppUpdatePresentation();   // iOS: router.push sheet route; Android: show modal
-closeFlexibleAppUpdatePresentation();    // router.back() / hide modal
-markFlexibleAppUpdateSheetClosed();      // iOS route unmount
+openFlexibleAppUpdatePresentation(config); // iOS: router.push sheet; Android: show modal (pass config)
+closeFlexibleAppUpdatePresentation();      // router.back() / hide modal
+markFlexibleAppUpdateSheetClosed();        // iOS route unmount
 ```
 
 ---
 
 ## components/flexible-app-update-controller.tsx
 
-1. Wait PostHog `ready`
-2. `shouldShowFlexibleAppUpdate(config)`
-3. Delay `showAfterLaunchDelayMs`
-4. Re-check eligibility
-5. `openFlexibleAppUpdatePresentation()` once per session
-6. Android: render `FlexibleAppUpdateModal` via `useSyncExternalStore`
-7. Android: `captureFlexibleUpdateShown` when `androidVisible` becomes true (`android_update_shown`)
-8. Android dismiss: `onDismiss('later' | 'backdrop' | 'back_button')` → `android_update_later_clicked` or `android_update_modal_closed`
+Launch prompt is async. ATT, PostHog flag reload on `AppState` active, and a new `config` object identity remount this effect. **Do not** set `handledThisSession = true` until the presentation actually opens — otherwise a cancelled first run skips the prompt for the rest of the session.
 
-Dev helpers: `resetFlexibleAppUpdateHandledSession()`.
+```tsx
+function waitForActiveAppState(): Promise<void> {
+  if (AppState.currentState === "active") return Promise.resolve();
+  return new Promise((resolve) => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        subscription.remove();
+        resolve();
+      }
+    });
+  });
+}
+
+useEffect(() => {
+  if (Platform.OS === "web") return;
+  if (!ready || !config || handledThisSession) return;
+
+  let cancelled = false;
+
+  (async () => {
+    await waitForActiveAppState();
+    if (cancelled) return;
+
+    const eligible = await shouldShowFlexibleAppUpdate(config);
+    if (cancelled || !eligible) return;
+
+    await new Promise((resolve) => setTimeout(resolve, config.showAfterLaunchDelayMs));
+    if (cancelled) return;
+
+    await waitForActiveAppState();
+    if (cancelled) return;
+
+    const stillEligible = await shouldShowFlexibleAppUpdate(config);
+    if (cancelled || !stillEligible || handledThisSession) return;
+
+    handledThisSession = true;
+    openFlexibleAppUpdatePresentation(config);
+  })();
+
+  return () => {
+    cancelled = true;
+  };
+}, [config?.enabled, config?.version, config?.showAfterLaunchDelayMs, ready]);
+```
+
+Then:
+
+1. Android: render `FlexibleAppUpdateModal` via `useSyncExternalStore`
+2. Android: `captureFlexibleUpdateShown` when `androidVisible` becomes true (`android_update_shown`)
+3. Android dismiss: `onDismiss('later' | 'backdrop' | 'back_button')` → `android_update_later_clicked` or `android_update_modal_closed`
+
+Dev helpers: `resetFlexibleAppUpdateHandledSession()` (Settings preview). Do not call it from the auto-prompt path.
 
 ---
 
