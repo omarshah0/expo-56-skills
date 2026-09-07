@@ -1,5 +1,5 @@
 ---
-name: expo-ota-forced-update
+name: expo-ota-forced-update (DEPRECATED - DONOT USE)
 description: Implements Expo OTA forced-update UI with per-platform (iOS/Android) toggles via PostHog or hardcoded config. Use when adding OTA update banners, expo-updates forced reload flows, ota-forced-update feature flags, or fixing update-banner behavior across Expo projects.
 ---
 
